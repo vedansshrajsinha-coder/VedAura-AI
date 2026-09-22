@@ -28,6 +28,11 @@ class Settings:
 
 def load_settings(root: str | Path = ".") -> Settings:
     root = Path(root)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(root / ".env")
+    except ImportError:
+        pass
     cfg = {}
     p = root / "config" / "default.json"
     if p.exists():

@@ -749,7 +749,7 @@ async function sendMessage(){
     // Send request to Flask
     const formData = new FormData();
 
-    formData.append("message", message);
+    formData.append("message", message);\n\n    if (isLoggedIn && conversations[currentConversation]?.id) {\n        formData.append("conversation_id", String(conversations[currentConversation].id));\n    }
 
     console.log(selectedFiles);
     selectedFiles.forEach(file => {

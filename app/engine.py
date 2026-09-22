@@ -1,162 +1,152 @@
-import base64
-from app.fast_responses import fast_response
-from app.memory_handler import (
-    is_memory_message,
-    remember,
-    recall_memory
-)
-from app.chatbot import get_response
+import io
+
+from app.memory_handler import is_memory_message, remember, recall_memory
 from app.commands import handle_command
-from app.prompts import SYSTEM_PROMPT
-from app.prompts import SYSTEM_PROMPT
-from pypdf import PdfReader
-from openpyxl import load_workbook
-
-def process_message(user_message, uploaded_files=None):
-    if uploaded_files:
-        uploaded_file = uploaded_files[0]
-    else:
-        uploaded_file = None
-
-    if uploaded_file:
-            print("Engine received:", uploaded_file.filename)
-
-    images = []
-    documents = ""
-    
-    if uploaded_files:
-
-        for uploaded_file in uploaded_files:
-
-            filename = uploaded_file.filename.lower()
-            print("Filename:", filename)
-            print("Mimetype:", uploaded_file.mimetype)     
-            print("Reached ChatGPT section")
-            print("Images:", len(images))
-            print("Documents length:", len(documents))
+from brain_gateway import ask as brain_ask
 
 
-            # ---------- IMAGE ----------
-            if filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+def _document_evidence(uploaded_files):
+    """
+    Convert supported uploaded documents into temporary evidence.
+    The files are NOT inserted into the persistent shared knowledge DB.
+    """
+    evidence = []
 
-                image_bytes = uploaded_file.read()
+    if not uploaded_files:
+        return evidence
 
-                images.append({
-                    "bytes": image_bytes,
-                    "mimetype": uploaded_file.mimetype
+    from pypdf import PdfReader
+    from openpyxl import load_workbook
+
+    for uploaded_file in uploaded_files:
+        filename = (uploaded_file.filename or "").strip()
+        lower = filename.lower()
+
+        try:
+            raw = uploaded_file.read()
+            text = ""
+
+            if lower.endswith((".txt", ".md")):
+                text = raw.decode("utf-8", errors="ignore")
+
+            elif lower.endswith(".pdf"):
+                reader = PdfReader(io.BytesIO(raw))
+                text = "\n\n".join(
+                    f"[PAGE {i + 1}]\n{page.extract_text() or ''}"
+                    for i, page in enumerate(reader.pages)
+                )
+
+            elif lower.endswith(".xlsx"):
+                workbook = load_workbook(
+                    io.BytesIO(raw),
+                    read_only=True,
+                    data_only=True
+                )
+                lines = []
+
+                for sheet in workbook.worksheets:
+                    lines.append(f"[SHEET {sheet.title}]")
+
+                    for row in sheet.iter_rows(values_only=True):
+                        lines.append(
+                            " | ".join(
+                                "" if cell is None else str(cell)
+                                for cell in row
+                            )
+                        )
+
+                text = "\n".join(lines)
+
+            elif lower.endswith((".html", ".htm")):
+                from bs4 import BeautifulSoup
+
+                soup = BeautifulSoup(
+                    raw.decode("utf-8", errors="ignore"),
+                    "html.parser"
+                )
+
+                for node in soup(["script", "style", "nav"]):
+                    node.decompose()
+
+                text = soup.get_text("\n")
+
+            elif lower.endswith(".docx"):
+                from docx import Document
+
+                document = Document(io.BytesIO(raw))
+                text = "\n".join(
+                    paragraph.text
+                    for paragraph in document.paragraphs
+                )
+
+            elif lower.endswith(".epub"):
+                import os
+                import tempfile
+
+                from ebooklib import epub, ITEM_DOCUMENT
+                from bs4 import BeautifulSoup
+
+                with tempfile.NamedTemporaryFile(
+                    suffix=".epub",
+                    delete=False
+                ) as tmp:
+                    tmp.write(raw)
+                    tmp_path = tmp.name
+
+                try:
+                    book = epub.read_epub(tmp_path)
+                    text = "\n".join(
+                        BeautifulSoup(
+                            item.get_content(),
+                            "html.parser"
+                        ).get_text("\n")
+                        for item in book.get_items_of_type(ITEM_DOCUMENT)
+                    )
+                finally:
+                    os.unlink(tmp_path)
+
+            text = text.strip()
+
+            if text:
+                evidence.append({
+                    "title": filename or "Uploaded document",
+                    "source_path": f"upload:{filename}",
+                    "text": text[:18000]
                 })
 
-                print("Image detected")
-                print("Image size:", len(image_bytes))
-                print("IMAGE BLOCK")
+        except Exception as exc:
+            evidence.append({
+                "title": filename or "Uploaded file",
+                "source_path": f"upload:{filename}",
+                "text": f"File could not be parsed: {exc}"
+            })
 
-            # ---------- TXT ----------
-            elif filename.endswith(".txt"):
+    return evidence
 
-                documents += "\n\n===== " + uploaded_file.filename + " =====\n"
-                documents += uploaded_file.read().decode("utf-8")
 
-                print("TXT detected")
-                print(documents[:200])
-                print("TXT BLOCK")
-            # ---------- PDF ----------
-            elif filename.endswith(".pdf"):
-
-                reader = PdfReader(uploaded_file)
-
-                documents += "\n\n===== " + uploaded_file.filename + " =====\n"
-
-                for page in reader.pages:
-                    page_text = page.extract_text()
-
-                    if page_text:
-                        documents += page_text + "\n"
-
-                print("PDF detected")
-                print(documents[:200])
-                print("PDF BLOCK")
-            # ---------- EXCEL ----------
-            elif filename.endswith(".xlsx"):
-
-                workbook = load_workbook(uploaded_file)
-
-                sheet = workbook.active
-
-                documents += "\n\n===== " + uploaded_file.filename + " =====\n"
-
-                for row in sheet.iter_rows(values_only=True):
-
-                    line = " | ".join(str(cell) if cell is not None else "" for cell in row)
-
-                    documents += line + "\n"
-
-                print("EXCEL detected")
-                print(documents[:300])
-                print("EXCEL BLOCK")
-            else:
-
-                print("Unsupported file:", filename)
-
-    # 2. Fast Responses
-    if not uploaded_files:
-        fast_reply = fast_response(user_message)
-        if fast_reply:
-            return fast_reply
-    # 1. Commands
+def process_message(
+    user_message,
+    uploaded_files=None,
+    conversation_history=None
+):
+    # Existing VedAura commands remain available.
     command_reply = handle_command(user_message)
     if command_reply:
         return command_reply
 
+    # Existing explicit memory commands remain available.
+    if is_memory_message(user_message):
+        return remember(user_message)
 
-
-    # 3. Memory Recall
     memory_reply = recall_memory(user_message)
     if memory_reply:
         return memory_reply
 
-    # 4. Save Memory
-    if is_memory_message(user_message):
-        return remember(user_message)
+    # Normal conversational requests now go through AI Brain.
+    result = brain_ask(
+        user_message,
+        history=conversation_history or [],
+        extra_evidence=_document_evidence(uploaded_files)
+    )
 
-    # 5. Chatgpt
-    content = [
-        {
-            "type": "input_text",
-            "text": user_message
-        }
-    ]
-    for image in images:
-        print("Building content...")
-        image_base64 = base64.b64encode(
-            image["bytes"]
-        ).decode("utf-8")
-
-        content.append({
-            "type": "input_image",
-            "image_url":
-            f"data:{image['mimetype']};base64,{image_base64}"
-        })
-
-    if documents:
-
-        content.append({
-            "type":"input_text",
-            "text":f"""
-    Attached documents:
-
-    {documents}
-    """
-        })
-    print("Creating content...")
-    chat_history = [
-        {
-            
-            "role":"user",
-            "content":content
-        }
-    ]
-    print("Chat history created")
-    print("Images:", len(images))
-    print("Documents:", len(documents))
-    print("Sending request to OpenAI...")
-    return get_response(chat_history)
+    return result["answer"]

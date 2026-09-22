@@ -4,3 +4,9 @@ python-dotenv
 gunicorn
 pypdf
 openpyxl
+numpy>=1.26,<3
+sentence-transformers>=5,<7
+python-docx>=1.1,<2
+ebooklib>=0.18,<1
+beautifulsoup4>=4.12,<5
+pytest>=8,<9

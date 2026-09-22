@@ -35,7 +35,10 @@ def get_brain():
 def _seed_legacy_brain_history(brain, history):
     if not history or not hasattr(brain, "memory"):
         return
-    from memory.system import Turn
+    try:
+        from memory.system import Turn
+    except ImportError:
+        return
     turns = []
     for item in history[-12:]:
         role = item.get("role") if isinstance(item, dict) else None
@@ -55,14 +58,8 @@ def ask(message, history=None, extra_evidence=None):
             if extra_evidence:
                 attachments = []
                 for item in extra_evidence:
-                    attachments.append(
-                        f"Uploaded evidence ({item.get('title', 'file')}):
-"
-                        f"{item.get('text', '')}"
-                    )
-                query += "
-
-" + "
-
-".join(attachments)
+                    title = item.get("title", "file")
+                    text = item.get("text", "")
+                    attachments.append(f"Uploaded evidence ({title}):\n{text}")
+                query += "\n\n" + "\n\n".join(attachments)
             return brain.ask(query)

@@ -202,20 +202,26 @@ def api_clear_conversations():
 
     return jsonify({"success": True})
 
-def _conversation_history_for_request(message):
-    """
-    Recover the current chat's saved turns without changing the existing
-    frontend API contract. The UI saves the user message immediately before
-    calling /chat, so the latest matching conversation identifies the active chat.
-    """
+def _conversation_history_for_request(message, conversation_id=None):
+    """Recover the active conversation without guessing when message text repeats."""
     if "user_id" not in session:
         return session.get("guest_brain_history", [])[-12:]
 
-    conversations = get_conversations(session["user_id"])
+    if conversation_id:
+        try:
+            conversation = get_conversation(
+                int(conversation_id),
+                session["user_id"]
+            )
+        except (TypeError, ValueError):
+            conversation = None
+        if conversation:
+            return (conversation.get("messages") or [])[-12:]
 
+    # Backward-compatible fallback for older clients.
+    conversations = get_conversations(session["user_id"])
     for conversation in conversations:
         messages = conversation.get("messages") or []
-
         if (
             messages
             and messages[-1].get("role") == "user"
@@ -229,8 +235,9 @@ def _conversation_history_for_request(message):
 def chat():
     message = request.form["message"]
     uploaded_files = request.files.getlist("files")
+    conversation_id = request.form.get("conversation_id")
 
-    history = _conversation_history_for_request(message)
+    history = _conversation_history_for_request(message, conversation_id)
 
     # The current user message is passed separately to the brain.
     if (
